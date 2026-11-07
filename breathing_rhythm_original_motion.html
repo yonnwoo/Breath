@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>호흡 · 리듬 선택</title><style>
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#fff;color:#555;font-family:system-ui,"Apple SD Gothic Neo",sans-serif}
+main{min-height:100svh;display:flex;flex-direction:column}
+.stage{flex:1;min-height:300px;display:flex;align-items:center;justify-content:center;padding:20px 16px 0}
+svg{display:block;width:min(70vh,680px,100%);height:auto;max-height:72vh;overflow:visible}
+footer{padding:10px 24px 28px;text-align:center}
+.status{font-size:12px;color:#888;min-height:22px;display:flex;justify-content:center;gap:12px;font-variant-numeric:tabular-nums}
+#remaining{min-width:36px}#rhythm{font-size:11px;color:#999;min-height:25px}
+fieldset{border:0;padding:0;margin:4px auto 18px;max-width:1100px}
+legend{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+#choices{display:flex;flex-wrap:wrap;justify-content:center;gap:8px 22px}
+.choice{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;padding:8px 0;color:#929292}
+.choice:has(input:checked){color:#333}
+input[type=radio]{appearance:none;width:13px;height:13px;border:1px solid #bbb;border-radius:1px;margin:0;display:grid;place-content:center}
+input:checked{border-color:#555}input:checked:before{content:"";width:7px;height:7px;background:#555}
+button{font:inherit;font-size:11px;color:#888;background:white;border:1px solid #e7e7e7;border-radius:3px;padding:7px 12px;cursor:pointer}
+button:hover{color:#333;border-color:#aaa}input:focus-visible,button:focus-visible{outline:2px solid #777;outline-offset:5px}
+.actions{display:flex;justify-content:center;gap:8px}
+#note{font-size:10px;color:#999;line-height:1.6;min-height:16px;margin:12px 0 0}
+@media(max-width:600px){.stage{min-height:280px;padding:12px}svg{width:100%;max-height:60svh}footer{padding:8px 18px 22px}#choices{gap:2px 16px}.choice{font-size:12px}#note{max-width:330px;margin:12px auto 0}}
+</style></head><body><main>
+<div class="stage" role="img" aria-label="선택한 호흡 리듬에 따라 눈과 입, 동심원이 움직이는 캐릭터"><svg id="art" viewBox="260 0 680 680" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+      <g id="rings" fill="none" stroke="#cfcfcf" stroke-width="1.1"></g>
+      <g id="face" fill="none" stroke="#cfcfcf" stroke-width="1.15" stroke-linecap="round">
+        <path id="leftEye"></path>
+        <path id="rightEye"></path>
+        <ellipse id="mouth" cx="600" cy="382" rx="6.5" ry="5.8"></ellipse>
+      </g>
+      <g id="handGuide" display="none" fill="none" stroke="#c4c4c4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path id="handOutline"/>
+        <path id="handActive" stroke="#888" stroke-width="2"/>
+        <circle id="handDot" r="5" fill="#777" stroke="white" stroke-width="2"/>
+      </g>
+      <g id="infinityGuide" display="none" fill="none" stroke="#c4c4c4" stroke-width="1.5">
+        <path id="infinityOutline"/>
+        <path id="infinityActive" stroke="#888" stroke-width="2"/>
+        <circle id="infinityDot" r="5" fill="#777" stroke="white" stroke-width="2"/>
+      </g>
+    </svg></div>
+<footer><div class="status"><span id="phase"></span><span id="remaining"></span><span id="finger"></span></div><div id="rhythm"></div>
+<fieldset><legend>호흡 리듬 선택</legend><div id="choices"></div></fieldset>
+<div class="actions"><button id="pause" aria-pressed="false">일시정지</button><button id="restart">처음부터</button><button id="fullscreen">전체화면</button></div>
+<p id="note"></p></footer></main><script>
+(() => {
+  const NS = "http://www.w3.org/2000/svg";
+  const cx = 600;
+  const cy = 340;
+
+  const defaults = {
+    inhale: 4,
+    exhale: 5,
+    hold: 0.6,
+    count: 6,
+    size: 100,
+    opacity: 65,
+    color: "#cfcfcf"
+  };
+
+  const state = { ...defaults };
+
+  const ringsGroup = document.getElementById("rings");
+  const leftEye = document.getElementById("leftEye");
+  const rightEye = document.getElementById("rightEye");
+  const mouth = document.getElementById("mouth");
+  const phaseLabel = document.getElementById("phase");
+  const remainingLabel = document.getElementById("remaining");
+  const pauseButton = document.getElementById("pause");
+
+  let ringPaths = [];
+  let elapsed = 0;
+  let lastTime = null;
+  let paused = false;
+
+  const clamp = (v, min = 0, max = 1) => Math.max(min, Math.min(max, v));
+  const smooth = (x) => {
+    x = clamp(x);
+    return x * x * (3 - 2 * x);
+  };
+  // Brief gentle onset followed by a long deceleration; zero velocity at both ends.
+  const breathEase = (x) => {
+    x = clamp(x);
+    return clamp(1 - Math.pow(1 - x, 4) * (1 + 4 * x));
+  };
+  const mix = (a, b, t) => a + (b - a) * t;
+
+  function makeArcPath(r, side) {
+    const gapAngle = Math.asin(Math.min(0.3, 8 / r));
+    const start = side === "left" ? Math.PI / 2 + gapAngle : -Math.PI / 2 + gapAngle;
+    const end = side === "left" ? 3 * Math.PI / 2 - gapAngle : Math.PI / 2 - gapAngle;
+
+    const x1 = cx + r * Math.cos(start);
+    const y1 = cy + r * Math.sin(start);
+    const x2 = cx + r * Math.cos(end);
+    const y2 = cy + r * Math.sin(end);
+
+    return `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r.toFixed(2)} ${r.toFixed(2)} 0 0 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`;
+  }
+
+  function buildRings() {
+    ringsGroup.replaceChildren();
+    ringPaths = [];
+    for (let i = 0; i < state.count; i++) {
+      const left = document.createElementNS(NS, "path");
+      const right = document.createElementNS(NS, "path");
+      ringsGroup.append(left, right);
+      ringPaths.push([left, right]);
+    }
+  }
+
+  function setEye(path, centerX, centerY, length, angleDeg) {
+    const angle = angleDeg * Math.PI / 180;
+    const dx = Math.cos(angle) * (length / 2);
+    const dy = Math.sin(angle) * (length / 2);
+    const x1 = centerX - dx;
+    const y1 = centerY - dy;
+    const x2 = centerX + dx;
+    const y2 = centerY + dy;
+    path.setAttribute("d", `M ${x1.toFixed(2)} ${y1.toFixed(2)} L ${x2.toFixed(2)} ${y2.toFixed(2)}`);
+  }
+
+  function renderFace(breath) {
+    const leftAngle = mix(-12, 12, breath);
+    const rightAngle = mix(12, -12, breath);
+    setEye(leftEye, 582, 299, 20, leftAngle);
+    setEye(rightEye, 618, 299, 20, rightAngle);
+
+    mouth.setAttribute("rx", mix(7.2, 12.8, breath).toFixed(2));
+    mouth.setAttribute("ry", mix(6.0, 11.2, breath).toFixed(2));
+    mouth.setAttribute("cy", mix(384, 379, breath).toFixed(2));
+  }
+
+  function renderRings(breath) {
+    const maxCount = state.count;
+    const alphaBase = state.opacity / 100;
+    const scale = state.size / 100;
+
+    // 최소 1개부터 시작, 들숨이 깊어질수록 나타날 수 있는 링 수가 증가.
+    for (let i = 0; i < maxCount; i++) {
+      const [left, right] = ringPaths[i];
+      const t = maxCount === 1 ? 0 : i / (maxCount - 1);
+
+      // 첫 번째 링은 항상 보이고, 나머지는 들숨 진행도에 따라 천천히 등장.
+      const appearStart = i === 0 ? 0 : t * 0.78;
+      const appear = i === 0 ? 1 : smooth((breath - appearStart) / 0.16);
+
+      // 각 링은 "보이기"와 동시에 들숨에 따라 커졌다가 날숨에 따라 작아짐.
+      const baseRadius = 112 + i * 14;
+      const growth = (18 + i * 12) * scale * 1.3;
+      const radius = baseRadius + growth * breath;
+
+      // 약간 더 유기적인 느낌을 위해 등장한 링은 숨에 따라 조금 더 바깥으로 밀림.
+      const revealPush = i === 0 ? 0 : 13 * appear * breath;
+      const finalRadius = radius + revealPush;
+
+      const opacity = alphaBase * appear;
+
+      left.setAttribute("d", makeArcPath(finalRadius, "left"));
+      right.setAttribute("d", makeArcPath(finalRadius, "right"));
+      left.setAttribute("stroke", state.color);
+      right.setAttribute("stroke", state.color);
+      left.setAttribute("opacity", opacity.toFixed(3));
+      right.setAttribute("opacity", opacity.toFixed(3));
+    }
+  }
+
+const presets=[
+['균등 호흡','4 : 4',[[4,1,'들이마시기'],[4,0,'내쉬기']]],
+['날숨 연장 호흡','4 : 6',[[4,1,'들이마시기'],[6,0,'내쉬기']]],
+['박스 호흡','4 : 4 : 4 : 4',[[4,1,'들이마시기'],[4,1,'머무르기'],[4,0,'내쉬기'],[4,0,'머무르기']]],
+['4–7–8 호흡','4 : 7 : 8',[[4,1,'들이마시기'],[7,1,'머무르기'],[8,0,'내쉬기']]],
+['생리학적 한숨','들숨 + 추가 들숨 + 긴 날숨',[[2.4,.75,'들이마시기'],[.8,1,'한 번 더 들이마시기'],[5,0,'길게 내쉬기']]],
+['다섯 손가락 호흡','5 × (3 : 3)',Array.from({length:5},(_,i)=>[[3,1,`${i+1} · 들이마시기`],[3,0,`${i+1} · 내쉬기`]]).flat()],
+['무한대 호흡','4 : 4',[[4,1,'들이마시기'],[4,0,'내쉬기']]]];
+// Each finger has an ascent and descent, meeting at a rounded fingertip.
+const handSegments=[
+ 'M430 440 C422 402 374 344 397 330',
+ 'M397 330 C420 316 461 375 490 365',
+ 'M490 365 C501 345 463 205 490 205',
+ 'M490 205 C517 205 532 325 555 325',
+ 'M555 325 C568 325 558 165 585 165',
+ 'M585 165 C612 165 610 320 625 320',
+ 'M625 320 C645 320 648 200 675 200',
+ 'M675 200 C702 200 672 350 687 350',
+ 'M687 350 C711 350 731 280 754 280',
+ 'M754 280 C785 280 787 392 770 440'
+];
+const $=id=>document.getElementById(id);
+const handPaths=handSegments.map(d=>{const p=document.createElementNS(NS,'path');p.setAttribute('d',d);p.setAttribute('visibility','hidden');$('handGuide').prepend(p);return p;});
+$('handOutline').setAttribute('d',handSegments.join(' ')+' M770 440 C755 480 727 499 715 540 L495 540 C490 498 449 481 430 440');
+// Both lobes meet with the same tangent at the centre.
+const infinitySegments=[
+ 'M600 340 C690 250 815 220 815 340 C815 460 690 430 600 340',
+ 'M600 340 C510 250 385 220 385 340 C385 460 510 430 600 340'
+];
+const infinityPaths=infinitySegments.map(d=>{const p=document.createElementNS(NS,'path');p.setAttribute('d',d);p.setAttribute('visibility','hidden');$('infinityGuide').prepend(p);return p;});
+$('infinityOutline').setAttribute('d',infinitySegments.join(' '));
+const handLengths=handPaths.map(p=>p.getTotalLength());
+const infinityLengths=infinityPaths.map(p=>p.getTotalLength());
+function trace(path,length,progress,dot,active,reverse=false){
+ const distance=length*(reverse?1-progress:progress);
+ const point=path.getPointAtLength(distance);
+ dot.setAttribute('cx',point.x);dot.setAttribute('cy',point.y);
+ active.setAttribute('d',path.getAttribute('d'));
+ active.setAttribute('stroke-dasharray',length+' '+length);
+ active.setAttribute('stroke-dashoffset',reverse?-length*(1-progress):length*(1-progress));
+}
+let selected=0;
+function sample(time) {
+ const phases=presets[selected][2],total=phases.reduce((s,p)=>s+p[0],0);
+ let t=((time%total)+total)%total,start=0;
+ for(let i=0;i<phases.length;i++){
+  const [duration,end,label]=phases[i];
+  if(t<duration)return {breath:mix(start,end,smooth(t/duration)),label,remaining:duration-t,index:i,progress:t/duration};
+  t-=duration;start=end;
+ }
+ return {breath:0,label:'들이마시기',remaining:4,index:0};
+}
+function render(time){
+ const p=sample(time);
+ if(selected===5){
+  // Alternate direction after five breaths, avoiding a jump across the palm.
+  const reverse=Math.floor(time/30)%2===1;
+  const index=reverse?9-p.index:p.index;
+  trace(handPaths[index],handLengths[index],smooth(p.progress),$('handDot'),$('handActive'),reverse);
+ }else if(selected===6){
+  trace(infinityPaths[p.index],infinityLengths[p.index],p.progress,$('infinityDot'),$('infinityActive'));
+ }else{renderFace(p.breath);renderRings(p.breath);}
+ document.getElementById('face').setAttribute('opacity',.585);
+ phaseLabel.textContent=p.label;
+ remainingLabel.textContent=p.remaining.toFixed(1)+'초';
+ document.getElementById('finger').textContent=selected===5?(Math.floor(p.index/2)+1)+' / 5':'';
+}
+function select(i){
+ selected=i;elapsed=0;lastTime=null;
+ $('rings').setAttribute('display',i<5?'inline':'none');
+ $('face').setAttribute('display',i<5?'inline':'none');
+ $('handGuide').setAttribute('display',i===5?'inline':'none');
+ $('infinityGuide').setAttribute('display',i===6?'inline':'none');
+ document.querySelector('.stage').setAttribute('aria-label',i===5?'손가락 윤곽을 올라갈 때 들숨, 내려갈 때 날숨':i===6?'무한대 기호의 오른쪽 고리에서 들숨, 왼쪽 고리에서 날숨':'호흡에 따라 움직이는 캐릭터');
+ document.querySelectorAll('input[name=rhythm]').forEach((el,j)=>el.checked=i===j);
+ document.getElementById('rhythm').textContent=presets[i][1];
+ document.getElementById('note').textContent=i>=4?'시간은 전시 시연값입니다. '+(i===5?'손가락을 올라가며 들숨, 내려오며 날숨. 다섯 번 후 반대 방향으로 이어집니다.':i===6?'오른쪽 고리에서 들숨, 왼쪽 고리에서 날숨.':'들숨에 짧은 들숨을 한 번 더합니다.'):'';
+ render(0);
+}
+presets.forEach((p,i)=>{
+ const label=document.createElement('label');label.className='choice';
+ const input=document.createElement('input');input.type='radio';input.name='rhythm';input.value=i;
+ input.addEventListener('change',()=>select(i));
+ const text=document.createElement('span');text.textContent=p[0];
+ label.append(input,text);document.getElementById('choices').append(label);
+});
+pauseButton.onclick=()=>{paused=!paused;pauseButton.textContent=paused?'재생':'일시정지';pauseButton.setAttribute('aria-pressed',String(paused));};
+document.getElementById('restart').onclick=()=>{elapsed=0;lastTime=null;render(0)};
+document.getElementById('fullscreen').onclick=async()=>{
+ try {if(document.fullscreenElement)await document.exitFullscreen();else await document.documentElement.requestFullscreen();}
+ catch(e){document.getElementById('fullscreen').textContent='전체화면 지원 안 됨'}
+};
+document.addEventListener('keydown',e=>{
+ if(/INPUT|BUTTON/.test(e.target.tagName))return;
+ if(/^[1-7]$/.test(e.key))select(Number(e.key)-1);
+ if(e.code==='Space'){e.preventDefault();pauseButton.click();}
+});
+document.addEventListener('visibilitychange',()=>lastTime=null);
+function tick(now){
+ if(lastTime!==null&&!paused)elapsed+=Math.min(.1,(now-lastTime)/1000);
+ lastTime=now;render(elapsed);requestAnimationFrame(tick);
+}
+buildRings();select(0);requestAnimationFrame(tick);
+})();
+</script></body></html>
